@@ -86,51 +86,77 @@ st.title("💳 Control de Tarjetas, Cuotas y Vencimientos")
 
 col_left, col_right = st.columns(2)
 
-# --- SECCIÓN 1: CARGA DE RESÚMENES ---
+# --- SECCIÓN 1: CARGA DE RESÚMENES (MULTI-ARCHIVO Y MULTI-HOJA) ---
 with col_left:
-    with st.expander("📥 Cargar nuevo resumen (Excel)", expanded=True):
-        archivo = st.file_uploader("Sube el archivo Excel del resumen", type=["xlsx"])
+    with st.expander("📥 Cargar resúmenes (Soporta múltiples archivos y pestañas)", expanded=True):
+        archivos = st.file_uploader(
+            "Sube uno o varios archivos Excel del resumen", 
+            type=["xlsx"], 
+            accept_multiple_files=True
+        )
         
-        if archivo:
-            df_upload = pd.read_excel(archivo)
-            
-            # Identificar columna Metodo / Tarjeta de forma dinámica
-            col_metodo = next((c for c in df_upload.columns if 'metodo' in c.lower()), None)
-            tarjeta_detectada = df_upload[col_metodo].dropna().iloc[0] if col_metodo and not df_upload[col_metodo].dropna().empty else "Visa Sin Nombre"
-            
-            col1, col2, col3 = st.columns(3)
+        if archivos:
+            col1, col2 = st.columns(2)
             with col1:
-                nombre_tarjeta = st.text_input("Identificador de tarjeta", value=str(tarjeta_detectada))
-            with col2:
                 mes_vto = st.selectbox("Mes de 1er Vencimiento", meses_nombres, index=datetime.now().month % 12)
-            with col3:
+            with col2:
                 anio_vto = st.number_input("Año de 1er Vencimiento", min_value=2024, max_value=2035, value=datetime.now().year)
                 
             fecha_primer_vto = f"{anio_vto}-{meses_nombres.index(mes_vto)+1:02d}-01"
             
-            if st.button("Guardar / Actualizar Tarjeta"):
-                cursor.execute("DELETE FROM consumos WHERE tarjeta = ?", (nombre_tarjeta,))
+            if st.button("🚀 Guardar / Procesar Todos los Archivos"):
+                total_consumos_cargados = 0
+                tarjetas_procesadas = set()
                 
-                col_cuota = next((c for c in df_upload.columns if 'cuota' in c.lower() or 'couta' in c.lower()), None)
-                col_monto = next((c for c in df_upload.columns if 'monto' in c.lower()), None)
-                col_concepto = next((c for c in df_upload.columns if 'concepto' in c.lower()), None)
+                for archivo in archivos:
+                    # Leer todas las pestañas de cada Excel
+                    dict_hojas = pd.read_excel(archivo, sheet_name=None)
+                    
+                    for nombre_hoja, df_upload in dict_hojas.items():
+                        if df_upload.empty:
+                            continue
+                        
+                        # Buscar columna de monto o concepto
+                        col_monto = next((c for c in df_upload.columns if 'monto' in str(c).lower()), None)
+                        col_concepto = next((c for c in df_upload.columns if 'concepto' in str(c).lower()), None)
+                        
+                        # Si la hoja no parece ser una tabla de consumos, la ignoramos
+                        if not col_monto and not col_concepto:
+                            continue
+                        
+                        # Detectar tarjeta (Prioridad: Columna Metodo > Nombre de la Pestaña > Nombre del Archivo)
+                        col_metodo = next((c for c in df_upload.columns if 'metodo' in str(c).lower()), None)
+                        if col_metodo and not df_upload[col_metodo].dropna().empty:
+                            nombre_tarjeta = str(df_upload[col_metodo].dropna().iloc[0])
+                        elif nombre_hoja and nombre_hoja.lower() not in ('sheet1', 'hoja1', 'tabla'):
+                            nombre_tarjeta = nombre_hoja
+                        else:
+                            nombre_tarjeta = archivo.name.replace(".xlsx", "").replace("Resumen_", "").replace("resumen_", "")
+                        
+                        col_cuota = next((c for c in df_upload.columns if 'cuota' in str(c).lower() or 'couta' in str(c).lower()), None)
+                        
+                        # Limpiar consumos previos de esta tarjeta solo la primera vez que se encuentra
+                        if nombre_tarjeta not in tarjetas_procesadas:
+                            cursor.execute("DELETE FROM consumos WHERE tarjeta = ?", (nombre_tarjeta,))
+                            tarjetas_procesadas.add(nombre_tarjeta)
+                        
+                        for _, row in df_upload.iterrows():
+                            val_cuota = row[col_cuota] if col_cuota else ''
+                            ca, ct = parsear_cuota(val_cuota)
+                            
+                            val_monto = row[col_monto] if col_monto else 0
+                            monto_float = limpiar_monto_es(val_monto)
+                            
+                            val_concepto = str(row[col_concepto]) if col_concepto else ''
+                            
+                            cursor.execute("""
+                                INSERT INTO consumos (tarjeta, concepto, monto, cuota_actual, cuota_total, primer_vencimiento)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            """, (nombre_tarjeta, val_concepto, monto_float, ca, ct, fecha_primer_vto))
+                            total_consumos_cargados += 1
                 
-                for _, row in df_upload.iterrows():
-                    val_cuota = row[col_cuota] if col_cuota else ''
-                    ca, ct = parsear_cuota(val_cuota)
-                    
-                    val_monto = row[col_monto] if col_monto else 0
-                    monto_float = limpiar_monto_es(val_monto)
-                    
-                    val_concepto = str(row[col_concepto]) if col_concepto else ''
-                    
-                    cursor.execute("""
-                        INSERT INTO consumos (tarjeta, concepto, monto, cuota_actual, cuota_total, primer_vencimiento)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (nombre_tarjeta, val_concepto, monto_float, ca, ct, fecha_primer_vto))
-                    
                 conn.commit()
-                st.success(f"¡Resumen de {nombre_tarjeta} cargado con éxito!")
+                st.success(f"¡Se procesaron exitosamente {len(tarjetas_procesadas)} tarjeta(s) ({total_consumos_cargados} consumos en total)!")
                 st.rerun()
 
 # --- SECCIÓN 2: OPCIONES BORRADO Y GESTIÓN ---
