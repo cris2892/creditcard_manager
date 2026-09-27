@@ -84,7 +84,6 @@ def preparar_dataframe_hoja(df_raw):
     if df_raw.empty:
         return df_raw
         
-    # Verificar si los encabezados actuales ya son válidos
     cols_actuales = [str(c).lower().strip() for c in df_raw.columns]
     tiene_monto = any(m in ' '.join(cols_actuales) for m in ['monto', 'importe', 'total', 'precio', 'pesos'])
     tiene_concepto = any(m in ' '.join(cols_actuales) for m in ['concepto', 'detalle', 'descripcion', 'comercio', 'establecimiento'])
@@ -92,7 +91,6 @@ def preparar_dataframe_hoja(df_raw):
     if tiene_monto or tiene_concepto:
         return df_raw
 
-    # Si los encabezados no son válidos, escanear primeras 10 filas
     for r in range(min(10, len(df_raw))):
         fila_vals = [str(v).lower().strip() for v in df_raw.iloc[r].values]
         hm = any(m in ' '.join(fila_vals) for m in ['monto', 'importe', 'total', 'precio', 'pesos'])
@@ -124,71 +122,90 @@ with col_left:
         )
         
         if archivos:
-            col1, col2 = st.columns(2)
-            with col1:
-                mes_vto = st.selectbox("Mes de 1er Vencimiento", meses_nombres, index=datetime.now().month % 12)
-            with col2:
-                anio_vto = st.number_input("Año de 1er Vencimiento", min_value=2024, max_value=2035, value=datetime.now().year)
-                
-            fecha_primer_vto = f"{anio_vto}-{meses_nombres.index(mes_vto)+1:02d}-01"
+            # 1. Escaneo previo para identificar las tarjetas/pestañas detectadas
+            tarjetas_detectadas_info = []
             
-            if st.button("🚀 Guardar / Procesar Todos los Archivos"):
-                total_consumos_cargados = 0
-                tarjetas_procesadas = set()
-                
-                for archivo in archivos:
-                    # Leer TODAS las pestañas del libro de Excel
+            for archivo in archivos:
+                try:
                     dict_hojas = pd.read_excel(archivo, sheet_name=None)
                     es_multi_pestaña = len(dict_hojas) > 1
                     
                     for nombre_hoja, df_raw in dict_hojas.items():
-                        df_upload = preparar_dataframe_hoja(df_raw)
-                        if df_upload.empty:
+                        df_u = preparar_dataframe_hoja(df_raw)
+                        if df_u.empty:
                             continue
+                            
+                        col_monto = next((c for c in df_u.columns if any(m in str(c).lower() for m in ['monto', 'importe', 'total', 'precio', 'pesos'])), None)
+                        col_concepto = next((c for c in df_u.columns if any(m in str(c).lower() for m in ['concepto', 'detalle', 'descripcion', 'comercio', 'establecimiento', 'consumo'])), None)
                         
-                        cols_lower = [str(c).lower().strip() for c in df_upload.columns]
-                        
-                        # Detectar columna de monto
-                        col_monto = next((c for c in df_upload.columns if any(m in str(c).lower() for m in ['monto', 'importe', 'total', 'precio', 'pesos'])), None)
-                        # Detectar columna de concepto
-                        col_concepto = next((c for c in df_upload.columns if any(m in str(c).lower() for m in ['concepto', 'detalle', 'descripcion', 'comercio', 'establecimiento', 'consumo'])), None)
-                        
-                        # Ignorar pestañas que no contengan tabla de gastos
                         if not col_monto and not col_concepto:
                             continue
-                        
-                        # Detectar nombre de la tarjeta para esta pestaña
-                        col_metodo = next((c for c in df_upload.columns if any(m in str(c).lower() for m in ['metodo', 'tarjeta', 'medio'])), None)
-                        
-                        # Si el libro tiene múltiples pestañas con nombres descriptivos (ej: "Visa", "Mastercard")
-                        # priorizamos el nombre de la pestaña para evitar que se sobreescriban entre sí.
+                            
+                        col_metodo = next((c for c in df_u.columns if any(m in str(c).lower() for m in ['metodo', 'tarjeta', 'medio'])), None)
                         nombre_hoja_clean = str(nombre_hoja).strip()
                         hoja_es_descriptiva = nombre_hoja_clean.lower() not in ('sheet1', 'hoja1', 'tabla', 'hoja 1', 'sheet 1')
                         
                         if es_multi_pestaña and hoja_es_descriptiva:
-                            tarjeta_base = nombre_hoja_clean
-                        elif col_metodo and not df_upload[col_metodo].dropna().empty:
-                            tarjeta_base = str(df_upload[col_metodo].dropna().iloc[0]).strip()
+                            t_nombre = nombre_hoja_clean
+                        elif col_metodo and not df_u[col_metodo].dropna().empty:
+                            t_nombre = str(df_u[col_metodo].dropna().iloc[0]).strip()
                         elif hoja_es_descriptiva:
-                            tarjeta_base = nombre_hoja_clean
+                            t_nombre = nombre_hoja_clean
                         else:
-                            tarjeta_base = archivo.name.replace(".xlsx", "").replace("Resumen_", "").replace("resumen_", "")
+                            t_nombre = archivo.name.replace(".xlsx", "").replace("Resumen_", "").replace("resumen_", "")
+                            
+                        tarjetas_detectadas_info.append({
+                            'archivo': archivo,
+                            'hoja': nombre_hoja,
+                            'tarjeta_defecto': t_nombre,
+                            'df': df_u
+                        })
+                except Exception as e:
+                    st.error(f"Error al leer {archivo.name}: {e}")
+
+            if tarjetas_detectadas_info:
+                st.markdown("### 📅 Configurar 1er Vencimiento por Tarjeta / Pestaña")
+                
+                vencimientos_config = {}
+                for idx, info in enumerate(tarjetas_detectadas_info):
+                    t_key = f"t_{idx}_{info['tarjeta_defecto']}"
+                    
+                    st.caption(f"📌 Tarjeta/Pestaña: **{info['tarjeta_defecto']}** (Archivo: {info['archivo'].name})")
+                    c1, c2, c3 = st.columns(3)
+                    
+                    with c1:
+                        nombre_final = st.text_input("Nombre Tarjeta", value=info['tarjeta_defecto'], key=f"name_{t_key}")
+                    with c2:
+                        mes_sel = st.selectbox("Mes 1er Vto", meses_nombres, index=datetime.now().month % 12, key=f"mes_{t_key}")
+                    with c3:
+                        anio_sel = st.number_input("Año 1er Vto", min_value=2024, max_value=2035, value=datetime.now().year, key=f"anio_{t_key}")
                         
+                    fecha_vto_str = f"{anio_sel}-{meses_nombres.index(mes_sel)+1:02d}-01"
+                    vencimientos_config[idx] = {
+                        'nombre_tarjeta': nombre_final,
+                        'fecha_vto': fecha_vto_str,
+                        'info': info
+                    }
+                    st.markdown("---")
+                
+                if st.button("🚀 Guardar / Procesar Todas las Tarjetas"):
+                    total_consumos_cargados = 0
+                    tarjetas_procesadas = set()
+                    
+                    for idx, cfg in vencimientos_config.items():
+                        n_tarjeta = cfg['nombre_tarjeta']
+                        f_vto = cfg['fecha_vto']
+                        df_upload = cfg['info']['df']
+                        
+                        if n_tarjeta not in tarjetas_procesadas:
+                            cursor.execute("DELETE FROM consumos WHERE tarjeta = ?", (n_tarjeta,))
+                            tarjetas_procesadas.add(n_tarjeta)
+                            
+                        col_monto = next((c for c in df_upload.columns if any(m in str(c).lower() for m in ['monto', 'importe', 'total', 'precio', 'pesos'])), None)
+                        col_concepto = next((c for c in df_upload.columns if any(m in str(c).lower() for m in ['concepto', 'detalle', 'descripcion', 'comercio', 'establecimiento', 'consumo'])), None)
                         col_cuota = next((c for c in df_upload.columns if any(m in str(c).lower() for m in ['cuota', 'couta', 'plan'])), None)
                         
                         for _, row in df_upload.iterrows():
-                            # Determinar tarjeta de la fila
-                            tarjeta_fila = tarjeta_base
-                            if col_metodo and pd.notna(row.get(col_metodo)):
-                                val_m = str(row.get(col_metodo)).strip()
-                                if val_m and not es_multi_pestaña:
-                                    tarjeta_fila = val_m
-                            
-                            # Limpiar consumos previos de esta tarjeta solo una vez por ejecucion
-                            if tarjeta_fila not in tarjetas_procesadas:
-                                cursor.execute("DELETE FROM consumos WHERE tarjeta = ?", (tarjeta_fila,))
-                                tarjetas_procesadas.add(tarjeta_fila)
-                            
                             val_cuota = row[col_cuota] if col_cuota and pd.notna(row.get(col_cuota)) else ''
                             ca, ct = parsear_cuota(val_cuota)
                             
@@ -197,19 +214,18 @@ with col_left:
                             
                             val_concepto = str(row[col_concepto]) if col_concepto and pd.notna(row.get(col_concepto)) else ''
                             
-                            # Ignorar filas sin monto ni concepto válido
                             if monto_float == 0 and not val_concepto:
                                 continue
                                 
                             cursor.execute("""
                                 INSERT INTO consumos (tarjeta, concepto, monto, cuota_actual, cuota_total, primer_vencimiento)
                                 VALUES (?, ?, ?, ?, ?, ?)
-                            """, (tarjeta_fila, val_concepto, monto_float, ca, ct, fecha_primer_vto))
+                            """, (n_tarjeta, val_concepto, monto_float, ca, ct, f_vto))
                             total_consumos_cargados += 1
-                
-                conn.commit()
-                st.success(f"¡Se procesaron exitosamente {len(tarjetas_procesadas)} tarjeta(s) ({total_consumos_cargados} consumos en total)!")
-                st.rerun()
+                            
+                    conn.commit()
+                    st.success(f"¡Se procesaron exitosamente {len(tarjetas_procesadas)} tarjeta(s) ({total_consumos_cargados} consumos en total)!")
+                    st.rerun()
 
 # --- SECCIÓN 2: OPCIONES BORRADO Y GESTIÓN ---
 with col_right:
