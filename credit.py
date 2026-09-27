@@ -73,6 +73,9 @@ def parsear_cuota(val):
     except ValueError:
         return 1, 1
 
+def fmt_moneda(val):
+    return f"${val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
 meses_nombres = [
     "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
@@ -130,7 +133,7 @@ with col_left:
                 st.success(f"¡Resumen de {nombre_tarjeta} cargado con éxito!")
                 st.rerun()
 
-# --- SECCIÓN 2: OPCS BORRADO Y GESTIÓN ---
+# --- SECCIÓN 2: OPCIONES BORRADO Y GESTIÓN ---
 with col_right:
     with st.expander("🗑️ Eliminar / Gestionar Datos", expanded=False):
         df_existente = pd.read_sql("SELECT DISTINCT tarjeta FROM consumos", conn)
@@ -237,13 +240,37 @@ for m in range(meses_a_proyectar):
 
 df_resultado = pd.DataFrame(proyecciones)
 
-df_mostrar = df_resultado.drop(columns=["key"]).copy()
+# Agregar Fila de TOTAL ACUMULADO al final de la tabla
+fila_total = {"Mes Vencimiento": "TOTAL ACUMULADO PROYECTADO"}
+for col in df_resultado.columns:
+    if col not in ("Mes Vencimiento", "key"):
+        fila_total[col] = df_resultado[col].sum()
+
+df_con_total = pd.concat([df_resultado, pd.DataFrame([fila_total])], ignore_index=True)
+
+# Formatear la tabla con totales
+df_mostrar = df_con_total.drop(columns=["key"]).copy()
 for col in df_mostrar.columns:
     if col != "Mes Vencimiento":
-        df_mostrar[col] = df_mostrar[col].apply(lambda x: f"${x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        df_mostrar[col] = df_mostrar[col].apply(fmt_moneda)
 
 st.dataframe(df_mostrar, use_container_width=True)
 
+# --- TARJETAS RESUMEN DE TOTALES EN LA PARTE INFERIOR ---
+st.markdown("### 💰 Totales Acumulados por Tarjeta")
+
+cols_metricas = st.columns(len(tarjetas_activas) + 1)
+with cols_metricas[0]:
+    total_general_proyectado = df_resultado["Total Pendiente"].sum()
+    st.metric("Total General Pendiente", fmt_moneda(total_general_proyectado))
+
+for idx, t in enumerate(tarjetas_activas):
+    with cols_metricas[idx + 1]:
+        monto_tarjeta = df_resultado[t].sum() if t in df_resultado.columns else 0.0
+        st.metric(f"Total {t}", fmt_moneda(monto_tarjeta))
+
+# Gráfico de barras apiladas
+st.markdown("---")
 tarjetas_cols = [t for t in tarjetas_activas if t in df_resultado.columns]
 fig = px.bar(
     df_resultado,
